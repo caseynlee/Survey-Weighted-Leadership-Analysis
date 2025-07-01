@@ -1,0 +1,346 @@
+---
+title: "480 project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-04-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(dplyr)
+library(survey)
+library(tidyr)
+
+```
+
+## R Markdown
+
+```{r}
+set.seed(123)
+
+# clean data
+data_clean <- read_sav("Downloads/ATP W131.sav") %>%
+  select(EVERLEAD1_W131, F_GENDER, F_AGECAT, WEIGHT_W131) %>%
+  mutate(
+    across(everything(), ~ ifelse(. == 99, NA, .)),
+    leader = ifelse(EVERLEAD1_W131 <= 3, 1, 0),
+    F_GENDER = factor(F_GENDER, levels = c(1, 2), labels = c("Male", "Female")),
+    F_AGECAT = factor(F_AGECAT, levels = c(1, 2, 3, 4),
+                      labels = c("18–29", "30–49", "50–64", "65+"))
+  ) %>%
+  drop_na() %>%
+  filter(F_GENDER %in% c("Male", "Female"))
+
+# survey design
+log_design <- svydesign(
+  ids = ~1,
+  weights = ~WEIGHT_W131,
+  data = data_clean
+)
+
+# logistic regression model
+log_reg <- svyglm(
+  leader ~ F_GENDER + F_AGECAT,
+  design = log_design,
+  family = quasibinomial()
+)
+
+summary(log_reg)
+
+```
+
+
+
+```{r}
+library(dplyr)
+library(haven)
+library(survey)
+library(tidyr)
+
+# Load and clean data
+data <- read_sav("Downloads/ATP W131.sav")
+
+data_clean <- data |>
+  as_tibble() |> 
+  dplyr::select(EVERLEAD1_W131, F_GENDER, F_AGECAT, WEIGHT_W131) |>
+  mutate(across(everything(), ~ifelse(. == 99, NA, .))) |>  
+  drop_na() |>  
+  mutate(
+    leader = ifelse(EVERLEAD1_W131 <= 3, 1, 0),  
+    F_GENDER = factor(F_GENDER),
+    F_AGECAT = factor(F_AGECAT),
+    stratum = interaction(F_GENDER, F_AGECAT, drop = TRUE)  
+  )
+
+# Not enough observations per stratum if we include gender = 3
+table(data_clean$stratum)
+
+```
+
+
+## Revised version excluding gender = 3
+
+```{r}
+
+library(haven)
+library(dplyr)
+library(survey)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+
+# Load the data
+data <- read_sav("Downloads/ATP W131.sav")
+
+# Clean the data and select relevant variables
+data_clean <- data |>
+  as_tibble() |> 
+  dplyr::select(EVERLEAD1_W131, F_GENDER, F_AGECAT, WEIGHT_W131) |>
+  mutate(across(everything(), ~ifelse(. == 99, NA, .))) |> # Convert 99 to NA
+  drop_na() |> 
+# Only including male and female for gender variable
+  filter(F_GENDER %in% c(1, 2)) |>            
+  mutate(
+# Convert leadership experience variable into binary(1-3: Yes, 4-5: No)
+    leader = ifelse(EVERLEAD1_W131 <= 3, 1, 0),
+    F_GENDER = factor(F_GENDER, labels = c("Male", "Female")),
+    F_AGECAT = factor(F_AGECAT, labels = c("18-29", "30-49", "50-64", "65+")),
+# Define stratum
+    stratum = interaction(F_GENDER, F_AGECAT, drop = TRUE)
+  )
+
+
+# Check if we have enough number of observations per stratum
+table(data_clean$stratum)
+
+# Stratified Random Sampling Simulation of size 400
+set.seed(123)
+stratum_info <- data_clean |>
+  count(stratum) |>
+  mutate(prop = n / sum(n),               # Proportion of each stratum
+         sample_n = round(prop * 400))    # Sample size per stratum
+
+# Merge the sample size info to original data
+data_joined <- data_clean |>
+  inner_join(stratum_info, by = "stratum")
+data_joined
+
+# Randomly sample within each stratum
+strat_sample <- data_joined |>
+  group_split(stratum) |>
+  map_df(~ slice_sample(.x, n = .x$sample_n[1]))
+
+# Define stratified design
+design_strat <- svydesign(
+  ids = ~1,
+  strata = ~stratum,
+  data = strat_sample,
+  weights = ~WEIGHT_W131
+)
+
+# Estimate overall population mean using Stratified random sampling
+svymean(~leader, design_strat)
+
+svyby(~leader, ~stratum, design_strat, svymean)
+
+# Logistic regression
+strat_model <- svyglm(leader ~ F_GENDER + F_AGECAT,
+                      design = design_strat,
+                      family = quasibinomial())
+summary(strat_model)
+
+
+# SRS 
+set.seed(123)
+srs_sample <- data_clean |>
+  slice_sample(n = nrow(strat_sample), replace = FALSE)
+
+design_srs <- svydesign(ids = ~1, data = srs_sample, weights = ~WEIGHT_W131)
+
+# Estimate proportion in SRS
+svymean(~leader, design_srs)
+
+# Compare standard error between Stratified sampling and SRS
+se_compare <- tibble(
+  method = c("Stratified Sampling", "SRS"),
+  estimate = c(coef(svymean(~leader, design_strat)),
+               coef(svymean(~leader, design_srs))),
+  se = c(SE(svymean(~leader, design_strat)),
+         SE(svymean(~leader, design_srs)))
+)
+se_compare
+
+
+# Calculate 95% Confidence Intervals
+
+leader_by_stratum <- svyby(~leader, ~stratum, design_strat, svymean)
+leader_by_stratum <- leader_by_stratum |>
+  mutate(
+    lower = leader - 1.96 * se,
+    upper = leader + 1.96 * se
+  )
+leader_by_stratum
+
+
+# Visualization
+
+ggplot(leader_by_stratum, aes(x = stratum, y = leader)) +
+  geom_col(fill = "skyblue") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(
+    title = "Leadership Experience in Childhood by Gender and Age Group",
+    x = "Stratum (Gender × Age Group)",
+    y = "Proportion with Leadership Experience"
+  ) +
+  theme_minimal() 
+
+```
+
+
+## Monte Carlo Version
+```{r}
+
+library(haven)
+library(dplyr)
+library(survey)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+
+# Load the data
+data <- read_sav("Downloads/ATP W131.sav")
+
+# Clean the data and select relevant variables
+data_clean <- data |>
+  as_tibble() |> 
+  dplyr::select(EVERLEAD1_W131, F_GENDER, F_AGECAT, WEIGHT_W131) |>
+  mutate(across(everything(), ~ifelse(. == 99, NA, .))) |> # Convert 99 to NA
+  drop_na() |> 
+# Only including male and female for gender variable
+  filter(F_GENDER %in% c(1, 2)) |>            
+  mutate(
+# Convert leadership experience variable into binary(1-3: Yes, 4-5: No)
+    leader = ifelse(EVERLEAD1_W131 <= 3, 1, 0),
+    F_GENDER = factor(F_GENDER, labels = c("Male", "Female")),
+    F_AGECAT = factor(F_AGECAT, labels = c("18-29", "30-49", "50-64", "65+")),
+# Define stratum
+    stratum = interaction(F_GENDER, F_AGECAT, drop = TRUE)
+  )
+
+
+# Check if we have enough number of observations per stratum
+table(data_clean$stratum)
+
+# Stratified Random Sampling Simulation of size 400
+set.seed(123)
+stratum_info <- data_clean |>
+  count(stratum) |>
+  mutate(prop = n / sum(n),               # Proportion of each stratum
+         sample_n = round(prop * 400))    # Sample size per stratum
+
+
+# Merge the sample size info to original data
+data_joined <- data_clean |>
+  inner_join(stratum_info, by = "stratum")
+data_joined
+
+# Define stratified design
+design_strat <- svydesign(
+  ids = ~1,
+  strata = ~stratum,
+  data = strat_sample,
+  weights = ~1
+)
+
+# Estimate overall population mean using Stratified random sampling
+svymean(~leader, design_strat)
+
+svyby(~leader, ~stratum, design_strat, svymean)
+
+# Logistic regression
+strat_model <- svyglm(leader ~ F_GENDER + F_AGECAT,
+                      design = design_strat,
+                      family = quasibinomial())
+summary(strat_model)
+
+
+# SRS 
+set.seed(123)
+srs_sample <- data_clean |>
+  slice_sample(n = nrow(strat_sample), replace = FALSE)
+
+design_srs <- svydesign(ids = ~1, data = srs_sample, weights = ~1)
+
+# Estimate proportion in SRS
+svymean(~leader, design_srs)
+
+# Compare standard error between Stratified sampling and SRS
+se_compare <- tibble(
+  method = c("Stratified Sampling", "SRS"),
+  estimate = c(coef(svymean(~leader, design_strat)),
+               coef(svymean(~leader, design_srs))),
+  se = c(SE(svymean(~leader, design_strat)),
+         SE(svymean(~leader, design_srs)))
+)
+se_compare
+
+# Monte Carlo simulation of stratified sampling
+n_iter <- 10000
+strat_results <- replicate(n_iter, {
+  strat_sample <- data_joined |>
+    group_split(stratum) |>
+    map_df(~ slice_sample(.x, n = .x$sample_n[1]))
+  
+  design <- svydesign(ids = ~1, strata = ~stratum, data = strat_sample, weights = ~1)
+  est <- coef(svymean(~leader, design))
+  se <- SE(svymean(~leader, design))
+  c(estimate = est, se = se)
+})
+
+# Monte Carlo simulation of SRS 
+set.seed(123)
+n_srs <- nrow(data_joined |> group_split(stratum) |> map_df(~ slice_sample(.x, n = .x$sample_n[1])))
+
+srs_results <- replicate(n_iter, {
+  srs_sample <- data_clean |>
+    slice_sample(n = n_srs, replace = FALSE)
+  
+  design <- svydesign(ids = ~1, data = srs_sample, weights = ~1)
+  est <- coef(svymean(~leader, design))
+  se <- SE(svymean(~leader, design))
+  c(estimate = est, se = se)
+})
+
+# Create results data frame
+strat_df <- as.data.frame(t(strat_results))
+colnames(strat_df) <- c("estimate", "se")  
+strat_df$method <- "Stratified"
+
+# After replicating SRS results
+srs_df <- as.data.frame(t(srs_results))
+colnames(srs_df) <- c("estimate", "se") 
+srs_df$method <- "SRS"
+
+# Combine
+results <- rbind(strat_df, srs_df)
+
+# Visualization
+ggplot(results, aes(x = estimate, fill = method)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Estimated Leadership Proportion",
+       x = "Estimated Proportion", y = "Density") +
+  theme_minimal()
+
+
+```
+Stratified sampling method yielded a narrower and more concentrated distribution compared to SRS, demonstrating greater precision. 
+
+
+
+
+
+
+
+
